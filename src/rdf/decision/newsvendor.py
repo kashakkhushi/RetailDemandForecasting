@@ -18,5 +18,5 @@ def compare_policies(results,costs):
 def sensitivity(results,ratios=(1.5,2,3,5,9)):
  rows=[]
  for r in ratios:
-  c=NewsvendorCosts(r,1); best=recommended_quantile(c,[float(x[5:])/100 for x in results if x.startswith("yhat_q")]); rows.append({"under_over_ratio":r,"critical_ratio":c.critical_ratio,"recommended_quantile":best})
+  c=NewsvendorCosts(r,1); best=recommended_quantile(c,[float(x[6:])/100 for x in results if x.startswith("yhat_q")]); rows.append({"under_over_ratio":r,"critical_ratio":c.critical_ratio,"recommended_quantile":best})
  return pd.DataFrame(rows)
