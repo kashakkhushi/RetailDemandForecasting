@@ -1,4 +1,5 @@
-<!-- Every number below came from an actual run. If your run differs, replace them.
+<!-- Every number below comes from the committed outputs in reports/ (metrics_models.csv,
+     newsvendor_policies.csv, newsvendor_sensitivity.csv, backtest_gbm.csv).
      Regenerate with: python scripts/01_backtest.py && python scripts/02_decision.py -->
 
 # Retail Demand Forecasting & Inventory Planning
@@ -19,60 +20,85 @@ The answer is not "order the forecast."
 Rolling-origin backtest, 28-day horizon, 6 disjoint origins, 5,376 scored series-days
 per model.
 
-| Model | WAPE | MASE | RMSSE | Bias | vs seasonal naive |
+| Model | WAPE | MAE | RMSE | Bias | vs seasonal naive |
 |---|---:|---:|---:|---:|---:|
-| **DirectGBM** — global, Tweedie, direct horizons | **0.399** | **1.051** | **0.830** | +0.61 | **+19.4%** |
-| Holt-Winters (ETS) | 0.406 | 1.071 | 0.855 | −0.01 | +17.9% |
-| Croston-SBA | 0.416 | 1.097 | 0.873 | +0.34 | +15.9% |
-| Moving average (28d) | 0.422 | 1.113 | 0.880 | +0.13 | +14.7% |
-| Seasonal moving average (7×4) | 0.431 | 1.136 | 0.883 | +0.13 | +12.9% |
-| Seasonal naive (7d) | 0.495 | 1.305 | 1.031 | +0.20 | — |
-| Naive | 0.495 | 1.307 | 1.047 | −0.55 | −0.1% |
+| **Holt-Winters (ETS)** — damped trend, weekly seasonality | **0.406** | **3.06** | **4.82** | **+0.01** | **+17.9%** |
+| Croston-SBA | 0.416 | 3.13 | 4.92 | −0.34 | +15.9% |
+| Moving average (28d) | 0.422 | 3.18 | 4.96 | −0.13 | +14.7% |
+| Seasonal moving average (7×4) | 0.431 | 3.24 | 4.98 | −0.13 | +12.9% |
+| DirectGBM — global LightGBM, Tweedie | 0.433 | 3.26 | 5.31 | −0.76 | +12.5% |
+| Seasonal naive (7d) | 0.495 | 3.73 | 5.81 | −0.20 | — |
+| Naive | 0.495 | 3.73 | 5.90 | +0.55 | −0.1% |
 
-Two things worth reading off this table.
+Bias is the mean of (forecast − actual): negative means the model under-forecasts.
+
+Three things worth reading off this table.
+
+**A well-configured classical model wins.** Holt-Winters is the most accurate model and
+essentially unbiased (+0.01 units per category-day). The global LightGBM model is less
+accurate and systematically under-forecasts (−0.76). With 32 series, under two years of
+history and no price or promotion covariates, there is little shared structure for a
+global model to exploit — and in this implementation the gradient-boosted model only uses
+lags of 28+ days for every horizon day (see *Direct features* below), while Holt-Winters
+updates on the most recent day.
 
 **Seasonal naive barely beats plain naive** (0.4948 vs 0.4954). At category level the
 weekly cycle is weaker relative to noise than the aggregate series suggests — a 28-day
 moving average beats both. Anyone who assumed strong weekly seasonality and skipped the
 ladder would have shipped the wrong baseline.
 
-**The most accurate model is the most biased.** DirectGBM wins on WAPE but carries a
-+0.61 bias — it systematically under-forecasts. Holt-Winters is nearly unbiased at −0.01.
-That trade-off is invisible in any absolute-error metric, and it is exactly why the
-stocking decision below orders to a *quantile* rather than to the point forecast.
+**Accuracy and bias tell different stories.** The direction of error is invisible in any
+absolute-error metric, and it matters for stocking: a model that under-forecasts causes
+stock-outs even when its WAPE looks acceptable. That is exactly why the stocking decision
+below orders to a *quantile* rather than to the point forecast.
 
 ## The decision layer
 
 Ordering to the mean forecast is the default habit and it is wrong whenever being short
-costs more than being long. The newsvendor critical ratio, `cu / (cu + co)`, gives the
+costs more than being long. The newsvendor critical ratio, cu ÷ (cu + co), gives the
 service level the cost structure implies — and the cost-minimising order quantity is that
 quantile of the demand distribution, not its mean.
 
-At a 3:1 understock-to-overstock ratio the critical ratio is **0.75**:
+The decision layer uses the DirectGBM quantile forecasts (q50, q75, q90, q95). At a 3:1
+understock-to-overstock ratio the critical ratio is **0.75**:
 
 | Policy | Fill rate | Stockout days | Cost/day | vs ordering to mean |
 |---|---:|---:|---:|---:|
-| Order to mean forecast | 76.0% | 47.8% | 6.61 | — |
-| Order to q50 | 77.0% | 48.5% | 6.40 | +3.3% |
-| **Order to q75** | **87.3%** | **28.4%** | **5.36** | **+18.9%** |
-| Order to q90 | 93.0% | 16.2% | 5.61 | +15.1% |
-| Order to q95 | 96.0% | 9.7% | 6.43 | +2.8% |
+| Order to mean forecast | 73.3% | 51.5% | 7.28 | — |
+| Order to q50 | 72.1% | 55.1% | 7.22 | +0.8% |
+| **Order to q75** | **84.3%** | **33.2%** | **5.60** | **+23.0%** |
+| Order to q90 | 91.6% | 17.8% | 5.57 | +23.5% |
+| Order to q95 | 94.6% | 11.6% | 6.16 | +15.4% |
 | *Perfect foresight* | *100%* | *0%* | *0.00* | *+100%* |
 
-**Ordering to q75 instead of the mean cuts expected cost 18.9% and lifts fill rate from
-76.0% to 87.3% on held-out demand** — with no change to the model. The gain comes from
+Cost/day is total cost divided by the 5,376 held-out category-days, in the relative units
+of the assumed cost ratio (understock = 3, overstock = 1).
+
+**Ordering to q75 instead of the mean cuts expected cost 23.0% and lifts fill rate from
+73.3% to 84.3% on held-out demand** — with no change to the model. The gain comes from
 using the forecast correctly, not from forecasting better.
 
-The theory holds empirically: sweeping the cost ratio, the cost-minimising policy tracks
-the critical ratio.
+**Why q90 is marginally cheaper than q75.** Theory says the 0.75 quantile is optimal, and
+it would be if the quantile forecasts were calibrated. They are not: on the held-out data,
+actual demand fell at or below the forecast q50 / q75 / q90 / q95 on 44.9% / 66.8% /
+82.2% / 88.4% of category-days (computed from `reports/backtest_gbm.csv`). Every quantile
+is too low, consistent with the model's negative bias, so the model's "q90" behaves like
+the true ~0.8 quantile — closer to the 0.75 critical ratio than its "q75". Calibrating the
+quantiles (for example with conformal prediction) before ordering is the natural next step.
 
-| Understock : overstock | Critical ratio | Best policy | Fill rate | Saving vs mean |
-|---|---:|---|---:|---:|
-| 1.5 : 1 | 0.60 | q50 | 77.0% | +2.8% |
-| 2 : 1 | 0.67 | q75 | 87.3% | +8.3% |
-| 3 : 1 | 0.75 | q75 | 87.3% | +18.9% |
-| 5 : 1 | 0.83 | q90 | 93.0% | +34.8% |
-| 9 : 1 | 0.90 | q95 | 96.0% | +52.8% |
+Sweeping the cost ratio, the recommended quantile — the available quantile nearest the
+critical ratio — rises as shortages become more expensive, as theory predicts:
+
+| Understock : overstock | Critical ratio | Recommended quantile |
+|---|---:|---|
+| 1.5 : 1 | 0.60 | q50 |
+| 2 : 1 | 0.67 | q75 |
+| 3 : 1 | 0.75 | q75 |
+| 5 : 1 | 0.83 | q90 |
+| 9 : 1 | 0.90 | q90 |
+
+Because the quantiles under-cover, the policy that is cheapest in hindsight is often one
+step higher than the nominal recommendation.
 
 **Measured vs assumed.** The forecast accuracy, fill rates and stockout counts are
 measured on held-out data. The cost ratio is an *assumption* — it is a business input, not
@@ -90,24 +116,26 @@ Most of the work in this repo is spent on not fooling itself.
 
 **Zeros are restored, not dropped.** The transactional export contains a row only for days
 a category actually sold, so the zeros are *missing*, not absent. `fill_calendar` reindexes
-every series onto a dense daily calendar; 23% of category-days are genuine zeros. Omitting
+every series onto a dense daily calendar; 22.8% of category-days are genuine zeros. Omitting
 them inflates every accuracy number, because the metric never sees the days the forecast
 should have said "nothing."
 
-**Direct multi-horizon, not recursive.** One model per horizon bucket, each using only
-lags that horizon can actually observe (`min_lag = bucket upper bound`). A recursive model
-feeds its own predictions back as lags: error compounds across the horizon, and the model
-is applied to inputs it never saw in training. Nothing here is ever fed a value that will
-not exist at scoring time.
+**Direct features, not recursive.** Every lag and rolling feature is shifted by a minimum
+lag of at least the forecast horizon before any rolling window is applied, so no feature
+ever uses a value that will not exist at scoring time, and the model's own predictions are
+never fed back as inputs. `DirectGBM` trains models for horizon buckets of 7, 14 and 28
+days; the backtest currently requests the full 28-day horizon, so all 28 days are scored by
+the 28-day bucket. Routing days 1–7 and 8–14 to their own buckets would let the model use
+more recent sales and is the first planned improvement.
 
 **Rolling origin, disjoint windows, fresh model per fold.** No random train/test split —
 that leaks the future into training and reports an accuracy nobody can reach. Test windows
 do not overlap, so no day is scored twice. `model_factory()` is called once per fold on
 purpose: reusing a fitted object across origins leaks later data into earlier folds.
 
-**Scaled metrics use training history only.** MASE and RMSSE scale error against in-sample
-seasonal-naive error computed strictly before each cutoff. Scaling by the test window is a
-leak, and a common one.
+**Leakage is tested, not assumed.** A test sets every value after a date to 999 and checks
+that every feature on or before that date is unchanged; another checks the smallest lag is
+never below the horizon.
 
 **Tweedie, not squared error on a log target.** Daily demand is non-negative, zero-inflated
 and right-skewed. Training on `log1p(y)` and inverting estimates the conditional *median*,
@@ -117,8 +145,10 @@ the positive tail together on the original scale.
 
 **MAPE is deliberately not implemented.** It is undefined on a large share of these
 observations, and the usual fixes — adding epsilon, dropping zero days — quietly change
-the question being asked. WAPE is used for the portfolio, MASE/RMSSE for cross-series
-comparability, pinball loss where the forecast feeds a decision.
+the question being asked. WAPE is used for the portfolio and pinball loss where the
+forecast feeds a decision. Scale-free MASE and RMSSE are implemented in
+`evaluation/metrics.py` (scaled by training-period seasonal-naive error only) for
+cross-series comparison.
 
 **WAPE is pooled, not averaged.** One ratio of summed errors to summed actuals. Averaging
 per-series percentages lets a low-volume category with 300% error dominate a portfolio
@@ -139,9 +169,11 @@ The demand panel is built with these choices, each of which changes the answer:
 | Key on **purchase** date, not delivery | Demand is when the customer ordered; delivery date smears one day across the logistics lag |
 | Exclude `canceled` / `unavailable` | Not demand that was met |
 | 2017-01-01 → 2018-08-15 | Pre-2017 is marketplace ramp-up, a different process; the last fortnight has incomplete order capture |
-| Drop categories < 365 total units | Too sparse to forecast; the count dropped is reported, not hidden |
+| Drop categories < 365 total units | Too sparse to forecast; 42 of 74 categories are dropped, and the count is reported, not hidden |
 
-Resulting panel: **32 categories × 592 days = 18,944 series-days, 22.8% zeros.**
+Resulting panel: **32 categories × 592 days = 18,944 series-days, 103,841 units,
+22.8% zeros.** The panel is committed as `data/panel.parquet`, so the backtest can run
+without the raw files.
 
 ---
 
@@ -152,14 +184,16 @@ pip install -r requirements.txt
 # place the Olist CSVs in data/raw/ — see data/README.md
 
 python scripts/00_prepare.py     # build and validate the demand panel
-python scripts/01_backtest.py    # full ladder through rolling-origin backtest
+python scripts/01_backtest.py    # full ladder through rolling-origin backtest (~1 minute)
 python scripts/02_decision.py    # newsvendor policy comparison + sensitivity
 python scripts/03_report.py      # figures
 
-pytest                           # test suite
+pytest                           # 40 tests
 ```
 
-Seeds are fixed; two runs produce identical numbers.
+Seeds are fixed, so repeated runs in the same environment produce identical numbers.
+Package versions are not pinned; newer library versions can shift results slightly
+(for example, DirectGBM WAPE 0.4329 vs 0.4326), while the other models reproduce exactly.
 
 ## Layout
 
@@ -171,13 +205,13 @@ src/rdf/
   features/lags.py      lag/rolling features, min_lag enforced per horizon
   models/base.py        Forecaster protocol — fit(train) / predict(h, futr)
   models/baselines.py   Naive · SeasonalNaive · MovingAverage · SeasonalMA · Croston-SBA
-  models/ets.py         Holt-Winters, additive seasonality
+  models/ets.py         Holt-Winters, damped additive trend, additive weekly seasonality
   models/gbm.py         DirectGBM — global, horizon-bucketed, Tweedie + quantile heads
-  evaluation/metrics.py WAPE · MASE · RMSSE · pinball · bias
+  evaluation/metrics.py WAPE · MAE · RMSE · bias · MASE · RMSSE · pinball · coverage
   evaluation/backtest.py rolling-origin harness
   decision/newsvendor.py critical ratio → order quantity → realised cost
 scripts/                00_prepare · 01_backtest · 02_decision · 03_report
-tests/                  including an explicit leakage test
+tests/                  40 tests, including an explicit leakage test
 reports/                metric tables, figures, DECISION_MEMO.md
 ```
 
@@ -197,5 +231,9 @@ the comparison fair rather than rigged.
   driver of retail demand is simply absent. Adding it is the highest-value extension.
 - **Orders approximate demand.** Demand censored by a stockout is unobservable here — an
   item that could not be bought looks like an item nobody wanted.
-- **The cost ratio is assumed, not measured.** Every currency figure is conditional on it,
+- **The cost ratio is assumed, not measured.** Every cost figure is conditional on it,
   which is why it is swept across a plausible range rather than fixed.
+- **Quantiles are not yet calibrated.** Their coverage is below nominal, so the decision
+  layer should be recalibrated before use.
+- **Single-period decision.** The newsvendor model ignores lead times, pack sizes, shelf
+  life and capacity.
